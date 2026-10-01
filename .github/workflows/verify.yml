@@ -1,0 +1,43 @@
+name: verify text-index key order
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Start ClickHouse 26.8 (same image and config as docker-compose.ci.yml)
+        run: |
+          docker run -d --name ch -p 18123:8123 \
+            -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+            -v "$PWD/docker/clickhouse/local/config.xml:/etc/clickhouse-server/config.xml" \
+            -v "$PWD/docker/clickhouse/local/users.xml:/etc/clickhouse-server/users.xml" \
+            clickhouse/clickhouse-server:26.8-alpine
+          for i in $(seq 60); do curl -sf localhost:18123/ping && break; sleep 2; done
+          curl -s 'localhost:18123/?query=SELECT%20version()'
+      - name: Install common-utils dependencies
+        run: |
+          corepack enable
+          yarn workspaces focus hyperdx @hyperdx/common-utils
+      - name: With the fix, the new tests pass
+        working-directory: packages/common-utils
+        run: |
+          DOTENV_CONFIG_PATH=.env.test yarn jest --config jest.int.config.js --runInBand -t "text index ordering" src/__tests__/metadata.int.test.ts
+          yarn jest src/__tests__/metadata.test.ts -t "text index paths"
+      - name: With the base metadata.ts, the same tests fail
+        working-directory: packages/common-utils
+        run: |
+          git checkout 5bdb68d -- src/core/metadata.ts
+          ! grep -q "sum(cardinality)" src/core/metadata.ts
+          set +e
+          DOTENV_CONFIG_PATH=.env.test yarn jest --config jest.int.config.js --runInBand -t "text index ordering" src/__tests__/metadata.int.test.ts
+          int_rc=$?
+          yarn jest src/__tests__/metadata.test.ts -t "text index paths"
+          unit_rc=$?
+          set -e
+          echo "int_rc=$int_rc unit_rc=$unit_rc"
+          test $int_rc -ne 0 && test $unit_rc -ne 0
